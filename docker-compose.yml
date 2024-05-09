@@ -1,0 +1,307 @@
+services:
+  wireguard:
+    container_name: wireguard
+    image: masipcat/wireguard-go:latest
+    cap_add:
+      - NET_ADMIN
+    volumes:
+        - /dev/net/tun:/dev/net/tun
+        - ./wireguard:/etc/wireguard
+    environment:
+        - WG_COLOR_MODE=always
+        - LOG_LEVEL=info
+    network_mode: "host"
+    restart: always
+    logging:
+      driver: loki
+      options:
+        loki-url: http://loki-server:3100/loki/api/v1/push
+
+  zabbix-web:
+    container_name: zabbix-web
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-6.4.12
+    restart: unless-stopped
+    user: "zabbix:zabbix"
+    depends_on:
+      - zabbix-server
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETFCAP
+      - SYS_ADMIN
+      - SYS_CHROOT
+      - SYS_PTRACE
+    ports:
+     - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl", "-f", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    env_file:
+      - ./env_vars/.env_web
+    secrets:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    logging:
+      driver: loki
+      options:
+        loki-url: http://loki-server:3100/loki/api/v1/push
+    networks:
+      frontend:
+        aliases:
+          - zabbix-web
+      backend:
+        aliases:
+          - zabbix-web
+
+  zabbix-web-service:
+    container_name: zabbix-web-service
+    image: zabbix/zabbix-web-service:alpine-6.4.12
+    restart: unless-stopped
+    user: "zabbix:zabbix"
+    depends_on:
+      - zabbix-web
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    healthcheck:
+      test: ["CMD-SHELL", "curl", "-f", "http://localhost:10053/report"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    env_file:
+      - ./env_vars/.env_web_service
+    logging:
+      driver: loki
+      options:
+        loki-url: http://loki-server:3100/loki/api/v1/push
+    networks:
+      backend:
+        aliases:
+          - zabbix-web-service
+
+  zabbix-server:
+    container_name: zabbix-server
+    image: zabbix/zabbix-server-pgsql:alpine-6.4.12
+    restart: unless-stopped
+    user: "zabbix:zabbix"
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETFCAP
+      - SYS_ADMIN
+      - SYS_CHROOT
+      - SYS_PTRACE
+      - NET_RAW
+    ports:
+      - "10051:10051"
+    depends_on:
+      - wireguard
+      - zabbix-db
+    volumes:
+      - zabbix_server:/usr/lib/zabbix
+    env_file:
+      - ./env_vars/.env_srv
+    secrets:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    logging:
+      driver: loki
+      options:
+        loki-url: http://loki-server:3100/loki/api/v1/push
+    networks:
+      backend:
+        aliases:
+          - zabbix-server
+
+  zabbix-db:
+    container_name: zabbix-db
+    image: postgres:alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zabbix"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - FOWNER
+      - SETGID
+      - SETUID
+    volumes:
+      - zabbix_db:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER_FILE=/run/secrets/POSTGRES_USER
+      - POSTGRES_PASSWORD_FILE=/run/secrets/POSTGRES_PASSWORD
+      - POSTGRES_DB=zabbix
+    secrets:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    logging:
+      driver: loki
+      options:
+        loki-url: http://loki-server:3100/loki/api/v1/push
+    networks:
+      backend:
+        aliases:
+          - zabbix-db
+
+  grafana-db:
+    container_name: grafana-db
+    image: postgres:alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zabbix"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - FOWNER
+      - SETGID
+      - SETUID
+    volumes:
+      - grafana_db:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER_FILE: /run/secrets/POSTGRES_USER
+      POSTGRES_PASSWORD_FILE: /run/secrets/POSTGRES_PASSWORD
+      POSTGRES_DB: grafana
+    secrets:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+    logging:
+      driver: loki
+      options:
+        loki-url: http://loki-server:3100/loki/api/v1/push
+    networks:
+      backend:
+        aliases:
+          - grafana-db
+  
+  grafana-server:
+    container_name: grafana-server
+    image: grafana/grafana-oss:latest
+    restart: unless-stopped
+    user: "grafana:472"
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETFCAP
+    ports:
+      - "3000:3000"
+    depends_on:
+      - grafana-db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - grafana_server:/var/lib/grafana
+    env_file:
+      - ./env_vars/.env_grafana
+    logging:
+      driver: loki
+      options:
+        loki-url: http://loki-server:3100/loki/api/v1/push
+    networks:
+      frontend:
+        aliases:
+          - grafana-server
+      backend:
+        aliases:
+          - grafana-server
+
+  promtail-agent:
+    container_name: promtail-agent
+    image: grafana/promtail:latest
+    restart: unless-stopped
+    command: "-config.file=/prom/promtail-config.yaml"
+    depends_on:
+      - loki-server
+    volumes:
+      - /var/log:/var/log
+      - ./env_vars/promtail-config.yaml:/prom/promtail-config.yaml
+    logging:
+      driver: loki
+      options:
+        loki-url: http://loki-server:3100/loki/api/v1/push
+    networks:
+      frontend:
+        aliases:
+          - promtail-agent
+
+  loki-server:
+    container_name: loki-server
+    image: grafana/loki:latest
+    restart: unless-stopped
+    user: "0:0"
+    ports:
+      - 3100:3100
+      - 7946
+      - 9095
+    command: "-config.file=/etc/loki/local-config.yaml"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - FOWNER
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: [ "CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3100/ready || exit 1" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro    
+      - ./env_vars/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki_server:/tmp/loki
+    logging:
+      driver: loki
+      options:
+        loki-url: http://localhost:3100/loki/api/v1/push
+    networks:
+      frontend:
+        aliases:
+          - loki-server
+
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.16.238.0/24
+  frontend:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.16.239.0/24
+
+volumes:
+  grafana_server:
+  zabbix_server:
+  loki_server:
+  grafana_db:
+  zabbix_db:
+
+secrets:
+  POSTGRES_USER:
+    file: ./env_vars/.POSTGRES_USER
+  POSTGRES_PASSWORD:
+    file: ./env_vars/.POSTGRES_PASSWORD
